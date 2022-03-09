@@ -1,0 +1,238 @@
+---
+title: "Market basket analysis"
+author: "Owen Looney"
+date: "5 February 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#loading required libraries
+library(dplyr)
+library(reticulate)
+library(stringr)
+library(tidyverse)
+library(glue)
+library(RColorBrewer)
+library(reactable)
+library(crosstalk)
+library(htmltools)
+library(ggplot2)
+
+
+```
+
+
+
+```{r importing data for market basket analysis, include=FALSE}
+# data from https://www.kaggle.com/newshuntkannada/dataset-for-apriori-and-fp-growth-algorithm/download
+
+#loading stored dataset so there is no requirement to go to Kaggle - reduce reisk of changes on Kaggles end breaking reproducibility
+data <- read.csv('Data/Raw/DataSetA.csv', header = FALSE, na.strings = "") 
+
+testing <- data %>%
+  mutate(transaction = row_number(),
+         count = 1) %>%
+  gather(key = transaction_id,
+         value = product,
+         V1:V7)%>%
+  arrange(transaction) %>%
+  select(-transaction_id) %>%
+  na.omit()
+
+
+#setting connection to updated python
+use_python('C:/Users/owenl/Desktop/Python3.10/python.exe')
+```
+
+
+
+```{python data work, include=FALSE}
+import pandas as pd
+from mlxtend.frequent_patterns import association_rules, apriori
+
+my_basket = r.testing.pivot_table(index='transaction', columns='product', values='count', aggfunc='sum').fillna(0)
+
+# making a function which returns 0 or 1
+# 0 means item was not in that transaction, 1 means item present in that transaction
+
+def encode(x):
+    if x<=0:
+        return 0
+    if x>=1:
+        return 1
+
+# applying the function to the dataset
+
+my_basket_sets = my_basket.applymap(encode)
+my_basket_sets.head()
+
+# using the 'apriori algorithm' with min_support=0.01 (1% of 9465)
+# It means the item should be present in atleast 94 transaction out of 9465 transactions only when we considered that item in
+# frequent itemset
+frequent_items = apriori(my_basket_sets, min_support = 0.01,use_colnames = True, max_len=3)
+frequent_item = frequent_items
+
+#converting frozen sets to strings
+def frozenset_to_str(x):
+    x = list(x)
+    x = str(x).lstrip('[').rstrip(']').strip()
+    return x
+
+frequent_item["itemset"] = frequent_item["itemsets"].apply(lambda x: frozenset_to_str(x))
+
+# now making the rules from frequent itemset generated above
+
+rules = association_rules(frequent_item, metric = "confidence", min_threshold = 0.2)
+rules.sort_values('lift', ascending = False, inplace = True)
+rule = rules
+
+#converting the antecedents to strings so they can be used by R
+rule["antecedents"] = rule["antecedents"].apply(lambda x: frozenset_to_str(x))
+rule["consequents"] = rule["consequents"].apply(lambda x: frozenset_to_str(x))
+
+
+  
+```
+
+This document outlines some work done with a random dataset from Kaggle to show some of the many skills i have learnt over the years. The data is read in using R, however the market basket analysis is done using python, as this was found to be the better than R apriori functions - also i just wanted to make more use of the markdown features that Rmarkdown provides.
+
+Shown below is a sample of the data, along with some graphs showing features about the data, along with an interactive table that has some nifty buttons to help explain the definitions from the apriori calculation a bit better. 
+
+```{r presenting data, echo=FALSE}
+reactable(head(data))
+
+items_freq <- py$frequent_item %>%
+  filter(!grepl(",", itemset))
+
+ggplot(items_freq, aes(x=itemset, y= support, fill = itemset))+
+  geom_bar(stat = 'identity')+
+  ggtitle("frequency of individual items purchased")+
+  theme(axis.text.x = element_text(angle=45))
+
+```
+
+The above graph shows support, and that the support for all products is quite evenly distributed. For those unaware of the terminology used like support, confidence, and lift, these values represent:
+
+# Support
+The support identifies how likely an object or combination of objects are to occur out of all products selected. A support of 15% would represent that 15% of all products purchased are this object
+
+# Confidence
+The confidence identifies how likely the combination of items are, given that the first item is already chosen. A confidence of 15% for cheese and butter would represent that 15% of customers who selected cheese also purchased butter.
+
+# Lift
+the lift identifies how likely customers are to select both options together than either option alone.
+
+
+```{R apriori table, echo=FALSE}
+
+apriori_data <- py$rule %>%
+  #removing conviction and leverage as i dont believe these metrics tell as much about the data as lift, support and confidence do
+  select(-conviction,
+         -leverage,
+         antecedents,
+         consequents,
+         `antecedent support`,
+         `consequent support`,
+         support,
+         confidence,
+         lift)%>%
+  #making the numbers %'s and making comments for users to see when button is selected later on
+  mutate(antecedent_support = round(`antecedent support`*100,3),
+         consequent_support = round(`consequent support`*100,3),
+         support = round(support*100,3),
+         confidence = round(confidence*100,3),
+         lift = round(lift,3),
+         Comments_1 = glue("{antecedent_support}% of all transactions contained item/s {antecedents}"),
+         Comments_2 = glue("{consequent_support}% of all transactions contained item/s {consequents}"),
+         Comments_3 = glue("{support}% of all purchases contained {antecedents} & {consequents} together"),
+         Comments_4 = glue("{confidence}% of all purchases that has {antecedents} also purchased {consequents}"),
+         Comments_5 = glue("The purchase of {antecedents} & {consequents} together is {lift} times more likely that either being selected alone"),
+         # creating blank column for button to go in
+         Details = NA)%>%
+  select(-`antecedent support`,
+         -`consequent support`)
+
+orange_pal <- function(x) rgb(colorRamp(c("#ffe4cc","#ffb54d"))(x),maxColorValue = 255)
+pink_pal <- function(x) rgb(colorRamp(c("#eb67b5","#eb800b"))(x),maxColorValue = 255)
+blue_green_pal <- function(x) rgb(colorRamp(c("#00afee","#b3d235"))(x),maxColorValue = 255)
+
+shared_data <- SharedData$new(apriori_data)
+
+outtbl <-
+  reactable(
+    shared_data,
+    searchable = T,
+    filterable = T,
+    columns = list(
+      antecedents = colDef(show = T),
+      consequents = colDef(show = T),
+      antecedent_support= colDef(show = T,
+                                   format = colFormat(suffix = "%", separators = F)),
+      consequent_support= colDef(show = T,
+                                   format = colFormat(suffix = "%", separators = F)),
+      support = colDef(
+        style = function(value) {
+          normalised <- (value-min(apriori_data$support))/(max(apriori_data$support)-min(apriori_data$support))
+          color <- orange_pal(normalised)
+          list(background = color)
+        },
+        format = colFormat(suffix = "%", separators = F)
+      ),
+      confidence = colDef(
+        style = function(value) {
+          normalised <- (value-min(apriori_data$confidence))/(max(apriori_data$confidence)-min(apriori_data$confidence))
+          color <- pink_pal(normalised)
+          list(background = color)
+        },
+        format = colFormat(suffix = "%", separators = F)
+      ),
+      lift = colDef(
+        style = function(value) {
+          normalised <- (value-min(apriori_data$lift))/(max(apriori_data$lift)-min(apriori_data$lift))
+          color <- blue_green_pal(normalised)
+          list(background = color)
+          }
+        ),
+      #hiding the individual comments columns
+      Comments_1 = colDef(show = F),
+      Comments_2 = colDef(show = F),
+      Comments_3 = colDef(show = F),
+      Comments_4 = colDef(show = F),
+      Comments_5 = colDef(show = F),
+      Details = colDef(
+        name = "Comments",
+        sortable = F,
+        cell = function() htmltools::tags$button("Show comments"))
+      ),
+    #making the table be sorted by lift by default
+    defaultSorted = "lift",
+    defaultSortOrder = "desc",
+    resizable = T,
+    wrap = T,
+    bordered = T,
+    elementId = "apriori-table",
+    #combining all comments into a single popup when button is clicked
+    onClick = JS("function(rowInfo,colInfo) {
+                 // Only handle events on the details column
+                 if (colInfo.id !== 'Details') {
+                 return
+                 }
+                 // Display an alert dialog with details for the row
+                 window.alert(JSON.stringify(rowInfo.row['Comments_1'],null,1) +
+                 '\\n' + '\\n' +
+                 JSON.stringify(rowInfo.row['Comments_2'],null,1) +
+                 '\\n' + '\\n' +
+                  JSON.stringify(rowInfo.row['Comments_3'],null,1) +
+                  '\\n' +'\\n' +
+                  JSON.stringify(rowInfo.row['Comments_4'],null,1) +
+                  '\\n' + '\\n' +
+                  JSON.stringify(rowInfo.row['Comments_5'],null,1))
+                 }")
+  )
+
+outtbl
+
+```
+
