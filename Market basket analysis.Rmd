@@ -125,6 +125,7 @@ The confidence identifies how likely the combination of items are, given that th
 the lift identifies how likely customers are to select both options together than either option alone.
 
 
+# Interactive table
 ```{R apriori table, echo=FALSE}
 
 apriori_data <- py$rule %>%
